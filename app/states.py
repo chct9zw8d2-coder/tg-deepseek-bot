@@ -1,8 +1,6 @@
-
 from aiogram.fsm.state import StatesGroup, State
 
 class Mode(StatesGroup):
-    idle = State()
-    homework_text = State()
+    homework = State()
+    photo = State()
     any_question = State()
-    photo_homework = State()
