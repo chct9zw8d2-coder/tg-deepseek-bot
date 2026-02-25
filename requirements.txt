@@ -3,6 +3,5 @@ uvicorn
 aiogram
 httpx
 pydantic-settings
-asyncpg
 pytesseract
 Pillow
