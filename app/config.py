@@ -1,19 +1,26 @@
+import os
 from pydantic_settings import BaseSettings
-from typing import List
+
 
 class Settings(BaseSettings):
+    # Telegram
     BOT_TOKEN: str
-    DEEPSEEK_API_KEY: str
     WEBHOOK_URL: str
+    BOT_USERNAME: str | None = None
+    ADMIN_IDS: str | None = None
 
-    DATABASE_URL: str
-    ADMIN_IDS: str = ""          # "123,456"
-    BOT_USERNAME: str = ""       # без @
-    REF_PERCENT: int = 20
+    # DB
+    DATABASE_URL: str | None = None
 
-    def admin_ids_list(self) -> List[int]:
-        if not self.ADMIN_IDS.strip():
-            return []
-        return [int(x.strip()) for x in self.ADMIN_IDS.split(",") if x.strip().isdigit()]
+    # DeepSeek
+    DEEPSEEK_API_KEY: str
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_TEXT_MODEL: str = "deepseek-chat"
+    DEEPSEEK_VISION_MODEL: str = "deepseek-vl2"
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
+
 
 settings = Settings()
