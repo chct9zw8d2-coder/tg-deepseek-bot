@@ -1,19 +1,8 @@
-aiogram==3.7.0
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-
-SQLAlchemy==2.0.32
-asyncpg==0.29.0
-alembic==1.13.2
-
-openai==1.40.6
-httpx==0.27.0
-python-dotenv==1.0.1
-
-# Совместимо с aiogram 3.7.x (pydantic < 2.8)
-pydantic==2.7.4
-pydantic-settings==2.3.4
-typing-extensions==4.12.2
-
-Pillow==10.4.0
-pytesseract==0.3.10
+fastapi
+uvicorn
+aiogram
+httpx
+pydantic-settings
+asyncpg
+pytesseract
+Pillow
