@@ -1,135 +1,102 @@
-import os
-import re
+# app/deepseek.py
 import base64
+import os
 import aiohttp
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = (os.getenv("DEEPSEEK_BASE_URL", "") or "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-chat")
 DEEPSEEK_VISION_MODEL = os.getenv("DEEPSEEK_VISION_MODEL", "deepseek-vl2")
 
 if not DEEPSEEK_API_KEY:
     raise RuntimeError("DEEPSEEK_API_KEY is not set")
 
-# глобальная http сессия
-_http: aiohttp.ClientSession | None = None
+
+def _endpoint() -> str:
+    # DeepSeek обычно совместим с OpenAI-style: /v1/chat/completions
+    return f"{DEEPSEEK_BASE_URL}/v1/chat/completions"
 
 
-# очистка мусорного latex
-def _sanitize(text: str) -> str:
-    text = text.replace("\\[", "").replace("\\]", "")
-    text = text.replace("\\(", "").replace("\\)", "")
-    text = re.sub(r"\\{2,}", r"\\", text)
-    return text.strip()
+def _clean_output(s: str) -> str:
+    # Убираем частые "кривые" обвязки, чтобы не было \\( \\) и \\[ \\]
+    s = s.replace("\\(", "").replace("\\)", "")
+    s = s.replace("\\[", "").replace("\\]", "")
+    s = s.replace("```", "")
+    return s.strip()
 
 
-# получить http session
-async def _get_session() -> aiohttp.ClientSession:
-    global _http
-
-    if _http is None or _http.closed:
-        _http = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=180)
-        )
-
-    return _http
-
-
-# ВАЖНО: эта функция нужна main.py
-async def close_http():
-    global _http
-
-    if _http and not _http.closed:
-        await _http.close()
-
-    _http = None
-
-
-# TEXT запрос
 async def ask_deepseek_text(prompt: str) -> str:
-    session = await _get_session()
+    url = _endpoint()
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    url = f"{DEEPSEEK_BASE_URL}/v1/chat/completions"
+    system = (
+        "Ты помощник по учебе. "
+        "Отвечай обычным текстом без LaTeX-обёрток вида \\( \\), \\[ \\]. "
+        "Если нужны формулы — пиши их простым текстом (например: x^2 - 2x + 1). "
+        "Не используй тройные кавычки/кодовые блоки."
+    )
 
     payload = {
         "model": DEEPSEEK_TEXT_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": "Отвечай понятно, без LaTeX-скобок \\(\\) и \\[\\]"
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2
+        "temperature": 0.2,
     }
 
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=120) as r:
+            txt = await r.text()
+            if r.status != 200:
+                raise RuntimeError(f"DeepSeek error {r.status}: {txt}")
+            data = await r.json()
+
+    content = data["choices"][0]["message"]["content"]
+    return _clean_output(content)
+
+
+async def ask_deepseek_vision(prompt: str, image_bytes: bytes, mime: str = "image/jpeg") -> str:
+    url = _endpoint()
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
-    async with session.post(url, json=payload, headers=headers) as resp:
+    system = (
+        "Ты помощник по учебе. "
+        "Сначала аккуратно распознай текст задания с изображения, затем реши. "
+        "Отвечай обычным текстом без LaTeX-обёрток вида \\( \\), \\[ \\]. "
+        "Не используй кодовые блоки."
+    )
 
-        data = await resp.json(content_type=None)
-
-        if resp.status >= 400:
-            raise RuntimeError(f"DeepSeek TEXT error: {data}")
-
-        text = data["choices"][0]["message"]["content"]
-
-        return _sanitize(text)
-
-
-# VISION запрос
-async def ask_deepseek_vision(image_bytes: bytes, prompt: str) -> str:
-
-    session = await _get_session()
-
-    url = f"{DEEPSEEK_BASE_URL}/v1/chat/completions"
-
-    b64 = base64.b64encode(image_bytes).decode()
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime};base64,{b64}"
 
     payload = {
         "model": DEEPSEEK_VISION_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": "Решай задания с фото понятно и без LaTeX-скобок"
-            },
+            {"role": "system", "content": system},
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{b64}"
-                        }
-                    }
-                ]
-            }
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
         ],
-        "temperature": 0.2
+        "temperature": 0.2,
     }
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=180) as r:
+            txt = await r.text()
+            if r.status != 200:
+                raise RuntimeError(f"DeepSeek vision error {r.status}: {txt}")
+            data = await r.json()
 
-    async with session.post(url, json=payload, headers=headers) as resp:
-
-        data = await resp.json(content_type=None)
-
-        if resp.status >= 400:
-            raise RuntimeError(f"DeepSeek VISION error: {data}")
-
-        text = data["choices"][0]["message"]["content"]
-
-        return _sanitize(text)
+    content = data["choices"][0]["message"]["content"]
+    return _clean_output(content)
