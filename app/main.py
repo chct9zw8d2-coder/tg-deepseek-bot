@@ -1,11 +1,16 @@
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import Update, ReplyKeyboardMarkup, KeyboardButton
+
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
+from aiogram.types import Update, Message, ReplyKeyboardMarkup, KeyboardButton
+
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from io import BytesIO
+
 from app.config import settings
-from app.deepseek import ask_text, ask_vision
+from app.deepseek import ask_text, solve_homework_vision
+
 
 app = FastAPI()
 api = app
@@ -13,15 +18,17 @@ api = app
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# простой режим
+USER_MODE = {}  # user_id -> "any" | "photo"
 
-def main_menu_kb() -> ReplyKeyboardMarkup:
-    # Кнопки меню (ReplyKeyboard — чтобы реально отображались)
+
+def menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="1) Помощь с дз"), KeyboardButton(text="2) Фото → решить дз")],
-            [KeyboardButton(text="3) Ответить на вопрос")],
-            [KeyboardButton(text="4) Подписка"), KeyboardButton(text="6) Докупить")],
-            [KeyboardButton(text="5) Реферальная программа")],
+            [KeyboardButton(text="📚 Помощь с дз"), KeyboardButton(text="📷 Фото → решить дз")],
+            [KeyboardButton(text="❓ Ответить на любой вопрос")],
+            [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="➕ Докупить")],
+            [KeyboardButton(text="👥 Реферальная программа")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери пункт меню 👇",
@@ -29,72 +36,76 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
 
 
 @dp.message(CommandStart())
-async def start_cmd(message: types.Message):
+async def start_cmd(message: Message):
+    USER_MODE[message.from_user.id] = "any"
+    await message.answer("Привет! Выбери пункт меню 👇", reply_markup=menu_kb())
+
+
+@dp.message(F.text == "📷 Фото → решить дз")
+async def set_photo_mode(message: Message):
+    USER_MODE[message.from_user.id] = "photo"
     await message.answer(
-        "Привет! Выбери пункт меню 👇",
-        reply_markup=main_menu_kb()
+        "Отправь фото задачи 📷\n\n"
+        "Советы:\n"
+        "• лучше как *файл* (без сжатия)\n"
+        "• кадр ближе, без бликов и наклона",
+        parse_mode="Markdown",
+        reply_markup=menu_kb(),
     )
 
 
-@dp.message(lambda m: (m.text or "").strip() in ["1) Помощь с дз", "3) Ответить на вопрос"])
-async def menu_text_mode(message: types.Message):
+@dp.message(F.text.in_({"📚 Помощь с дз", "❓ Ответить на любой вопрос"}))
+async def set_any_mode(message: Message):
+    USER_MODE[message.from_user.id] = "any"
+    await message.answer("Ок! Напиши вопрос текстом — отвечу 👇", reply_markup=menu_kb())
+
+
+@dp.message(F.text.in_({"💎 Подписка", "👥 Реферальная программа", "➕ Докупить"}))
+async def stub(message: Message):
     await message.answer(
-        "Ок! Напиши свой вопрос текстом — я отвечу ✅",
-        reply_markup=main_menu_kb()
+        "Этот раздел подключим следующим шагом.\n"
+        "Сейчас доступны: текстовые вопросы и решение по фото ✅",
+        reply_markup=menu_kb(),
     )
 
 
-@dp.message(lambda m: (m.text or "").strip() == "2) Фото → решить дз")
-async def menu_photo_mode(message: types.Message):
-    await message.answer(
-        "Отправь фото задания 📷 (лучше ровно, без наклона). Я решу и пришлю ответ ✅",
-        reply_markup=main_menu_kb()
-    )
+@dp.message(F.photo)
+async def photo_handler(message: Message):
+    await message.answer("📷 Принял фото. Решаю через Vision...")
 
-
-@dp.message(lambda m: (m.text or "").strip() in ["4) Подписка", "5) Реферальная программа", "6) Докупить"])
-async def menu_stub(message: types.Message):
-    # Заглушка (чтобы меню работало сразу). Подписки/рефералка/докупка подключаются отдельными хендлерами.
-    await message.answer(
-        "Этот раздел в процессе подключения. Сейчас доступны: 1) текст, 2) фото.\n\n"
-        "Напиши вопрос или отправь фото 👇",
-        reply_markup=main_menu_kb()
-    )
-
-
-@dp.message(lambda m: m.photo is not None)
-async def handle_photo(message: types.Message):
     try:
-        photo = message.photo[-1]  # самое большое
+        photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
-        # скачиваем файл в память
-        file_bytes = await bot.download_file(file.file_path)
-        image_bytes = file_bytes.read()
+        buf = BytesIO()
+        await bot.download_file(file.file_path, destination=buf)
+        image_bytes = buf.getvalue()
     except Exception as e:
-        await message.answer(f"❌ Не смог скачать фото: {e}", reply_markup=main_menu_kb())
+        await message.answer(f"❌ Не смог скачать фото: {e}", reply_markup=menu_kb())
         return
 
-    await message.answer("🧠 Думаю над задачей с фото...")
+    answer = await solve_homework_vision(
+        image_bytes,
+        "Реши задачу с фото. Ответ дай обычным текстом, без LaTeX и без обратных слешей."
+    )
+    await message.answer(answer, reply_markup=menu_kb())
 
-    answer = await ask_vision(image_bytes, "Реши задачу с фото. Ответ дай обычным текстом, без LaTeX.")
-    await message.answer(answer, reply_markup=main_menu_kb())
 
-
-@dp.message()
-async def handle_text(message: types.Message):
-    text = (message.text or "").strip()
-    if not text:
+@dp.message(F.text)
+async def text_handler(message: Message):
+    # игнорируем команды кроме /start
+    if message.text.startswith("/"):
         return
 
     await message.answer("🧠 Думаю...")
 
-    answer = await ask_text(text)
-    await message.answer(answer, reply_markup=main_menu_kb())
+    answer = await ask_text(message.text)
+    await message.answer(answer, reply_markup=menu_kb())
 
 
 @app.on_event("startup")
 async def on_startup():
-    await bot.set_webhook(settings.WEBHOOK_URL)
+    # это лечит дубли, если сервис падал и Telegram накопил апдейты
+    await bot.set_webhook(settings.WEBHOOK_URL, drop_pending_updates=True)
 
 
 @app.post("/webhook")
@@ -102,7 +113,7 @@ async def webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
-    return {"ok": True}
+    return {"ok": True
 
 
 @app.get("/")
