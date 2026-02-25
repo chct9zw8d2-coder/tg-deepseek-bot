@@ -1,94 +1,103 @@
+import os
 import base64
-import httpx
-from app.config import settings
+import aiohttp
 
 
-BASE_URL = settings.DEEPSEEK_BASE_URL or "https://api.deepseek.com"
+def _env(name: str, default: str | None = None) -> str | None:
+    v = os.getenv(name)
+    if v is None or v.strip() == "":
+        return default
+    return v.strip()
 
 
-async def ask_deepseek(prompt: str) -> str:
-    url = f"{BASE_URL}/chat/completions"
+DEEPSEEK_API_KEY = _env("DEEPSEEK_API_KEY")
+DEEPSEEK_BASE_URL = _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_TEXT_MODEL = _env("DEEPSEEK_TEXT_MODEL", "deepseek-chat")
+DEEPSEEK_VISION_MODEL = _env("DEEPSEEK_VISION_MODEL", "deepseek-vl2")
 
+
+class DeepSeekError(Exception):
+    pass
+
+
+def _clean_for_telegram(text: str) -> str:
+    # Убираем "кривые" latex-обертки, которые портят вид в Telegram
+    for bad in ["\\(", "\\)", "\\[", "\\]"]:
+        text = text.replace(bad, "")
+    # иногда модель ставит лишние обратные слэши
+    text = text.replace("\\\\", "\\")
+    return text.strip()
+
+
+async def _post_chat(messages, model: str) -> str:
+    if not DEEPSEEK_API_KEY:
+        raise DeepSeekError("DEEPSEEK_API_KEY не задан в переменных окружения")
+
+    url = f"{DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
 
     payload = {
-        "model": settings.DEEPSEEK_TEXT_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Ты помощник по учебе. Отвечай понятно и структурированно. "
-                    "НЕ используй LaTeX. Пиши обычным текстом."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "temperature": 0.2
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(url, headers=headers, json=payload)
+    timeout = aiohttp.ClientTimeout(total=120)
 
-    data = response.json()
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            data = await resp.json(content_type=None)
 
-    if "choices" not in data:
-        return f"Ошибка API: {data}"
+            if resp.status >= 400:
+                raise DeepSeekError(f"DeepSeek API error {resp.status}: {data}")
 
-    return data["choices"][0]["message"]["content"]
+            try:
+                text = data["choices"][0]["message"]["content"]
+            except Exception:
+                raise DeepSeekError(f"Unexpected response: {data}")
+
+            return _clean_for_telegram(text)
 
 
-async def ask_deepseek_vision(image_bytes: bytes, prompt: str) -> str:
-    url = f"{BASE_URL}/chat/completions"
+# ============ PUBLIC API ============
 
-    headers = {
-        "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
+async def ask_text(user_text: str) -> str:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты учебный помощник. Отвечай по-русски, структурируй решение."
+                " Не используй LaTeX-обертки вида \\( \\) или \\[ \\]."
+            )
+        },
+        {"role": "user", "content": user_text}
+    ]
+    return await _post_chat(messages, model=DEEPSEEK_TEXT_MODEL)
 
-    image_base64 = base64.b64encode(image_bytes).decode()
 
-    payload = {
-        "model": settings.DEEPSEEK_VISION_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Ты помощник по учебе. "
-                    "Распознавай текст с фото и решай задачу. "
-                    "НЕ используй LaTeX. Пиши обычным текстом."
-                )
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }
-                    }
-                ]
-            }
-        ],
-        "temperature": 0.2
-    }
+async def ask_vision(image_bytes: bytes) -> str:
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64}"
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(url, headers=headers, json=payload)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты решаешь задачи по фото. Сначала аккуратно перепиши условие (как ты его понял), "
+                "потом дай решение по шагам, затем итоговый ответ. "
+                "Не используй LaTeX-обертки вида \\( \\) или \\[ \\]."
+            )
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Реши задачу с изображения. Пиши понятным русским текстом."},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
 
-    data = response.json()
-
-    if "choices" not in data:
-        return f"Ошибка Vision API: {data}"
-
-    return data["choices"][0]["message"]["content"]
+    return await _post_chat(messages, model=DEEPSEEK_VISION_MODEL)
