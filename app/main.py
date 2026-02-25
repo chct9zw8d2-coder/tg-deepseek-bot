@@ -2,109 +2,140 @@ from fastapi import FastAPI, Request
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Update, Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Update,
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 
 from app.config import settings
 from app.deepseek import ask_deepseek
 
+# --- FastAPI ---
 app = FastAPI()
-api = app  # оставил как у тебя
 
+# --- Bot / Dispatcher ---
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
-# --- Главное меню (Reply Keyboard) ---
-def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📚 Помощь с дз"), KeyboardButton(text="📷 Фото и решить дз")],
-            [KeyboardButton(text="❓ Ответить на вопрос"), KeyboardButton(text="💎 Подписка")],
-            [KeyboardButton(text="👥 Реферальная программа"), KeyboardButton(text="➕ Докупить")],
-        ],
-        resize_keyboard=True,
-        selective=True,
+# =========================
+# INLINE MENU
+# =========================
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📚 Помощь с дз", callback_data="menu:hw")],
+            [InlineKeyboardButton(text="📷 Фото и решить дз", callback_data="menu:photo")],
+            [InlineKeyboardButton(text="❓ Ответить на любой вопрос", callback_data="menu:any")],
+            [InlineKeyboardButton(text="💎 Подписка", callback_data="menu:sub")],
+            [InlineKeyboardButton(text="👥 Реферальная программа", callback_data="menu:ref")],
+            [InlineKeyboardButton(text="➕ Докупить", callback_data="menu:topup")],
+        ]
     )
 
 
+# =========================
+# START
+# =========================
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
-    # очищаем состояние (на будущее, если FSM используешь)
     await state.clear()
 
-    # Важно: reply_markup=main_menu() чтобы меню точно появилось
     await message.answer(
         "Привет! Выбери пункт меню 👇",
-        reply_markup=main_menu()
+        reply_markup=main_menu(),
     )
 
 
-# --- Нажатия на пункты меню ---
-@dp.message(F.text == "📚 Помощь с дз")
-async def menu_help_hw(message: Message):
-    await message.answer("Напиши вопрос/задание текстом — я помогу 👇")
+# =========================
+# CALLBACK MENU HANDLERS
+# =========================
+@dp.callback_query(F.data == "menu:hw")
+async def cb_hw(cb: CallbackQuery):
+    await cb.message.answer("📚 Напиши задание текстом — решу и объясню 👇")
+    await cb.answer()
 
 
-@dp.message(F.text == "📷 Фото и решить дз")
-async def menu_photo(message: Message):
-    await message.answer("Пришли фото задачи (картинкой). Я распознаю и решу ✅")
+@dp.callback_query(F.data == "menu:photo")
+async def cb_photo(cb: CallbackQuery):
+    await cb.message.answer("📷 Пришли фото задачи — я распознаю и решу.")
+    await cb.answer()
 
 
-@dp.message(F.text == "❓ Ответить на вопрос")
-async def menu_any_question(message: Message):
-    await message.answer("Задай любой вопрос — отвечу 👇")
+@dp.callback_query(F.data == "menu:any")
+async def cb_any(cb: CallbackQuery):
+    await cb.message.answer("❓ Задай любой вопрос — отвечу 👇")
+    await cb.answer()
 
 
-@dp.message(F.text == "💎 Подписка")
-async def menu_sub(message: Message):
-    await message.answer(
-        "Подписка на месяц:\n"
-        "1) Старт — 50 запросов/сутки за 199 ⭐\n"
-        "2) Про — 100 запросов/сутки за 350 ⭐\n"
-        "3) Премиум — 200 запросов/сутки за 700 ⭐\n\n"
-        "Пока это меню-заглушка. Дальше подключим оплату Stars."
+@dp.callback_query(F.data == "menu:sub")
+async def cb_sub(cb: CallbackQuery):
+    await cb.message.answer(
+        "💎 Подписка на месяц:\n\n"
+        "Старт — 50 запросов/сутки — 199 ⭐\n"
+        "Про — 100 запросов/сутки — 350 ⭐\n"
+        "Премиум — 200 запросов/сутки — 700 ⭐"
     )
+    await cb.answer()
 
 
-@dp.message(F.text == "👥 Реферальная программа")
-async def menu_ref(message: Message):
-    await message.answer(
-        "Реферальная программа (заглушка):\n"
-        "Скоро здесь будет твоя ссылка и начисления."
+@dp.callback_query(F.data == "menu:ref")
+async def cb_ref(cb: CallbackQuery):
+    await cb.message.answer(
+        "👥 Реферальная программа:\n\n"
+        "Скоро здесь появится твоя ссылка и заработок."
     )
+    await cb.answer()
 
 
-@dp.message(F.text == "➕ Докупить")
-async def menu_topup(message: Message):
-    await message.answer(
-        "Докупить запросы (заглушка):\n"
+@dp.callback_query(F.data == "menu:topup")
+async def cb_topup(cb: CallbackQuery):
+    await cb.message.answer(
+        "➕ Докупить запросы:\n\n"
         "+10 запросов — 99 ⭐\n"
-        "+50 запросов — 150 ⭐\n\n"
-        "Дальше подключим оплату Stars."
+        "+50 запросов — 150 ⭐"
     )
+    await cb.answer()
 
 
-# --- Общий обработчик текста (важно: не отвечаем на команды) ---
+# =========================
+# TEXT HANDLER (DeepSeek)
+# =========================
 @dp.message(F.text)
 async def handle_text(message: Message):
-    # команды типа /start не трогаем, чтобы не было дублей
-    if message.text and message.text.startswith("/"):
+    # игнорируем команды
+    if message.text.startswith("/"):
         return
 
-    answer = await ask_deepseek(message.text)
+    await message.answer("⏳ Думаю...")
+
+    try:
+        answer = await ask_deepseek(message.text)
+    except Exception as e:
+        answer = f"Ошибка DeepSeek: {e}"
+
     await message.answer(answer)
 
 
+# =========================
+# WEBHOOK
+# =========================
 @app.on_event("startup")
 async def on_startup():
-    # Важно: очищаем очередь накопленных апдейтов (это и давало много одинаковых /start)
-    await bot.set_webhook(settings.WEBHOOK_URL, drop_pending_updates=True)
+    # очищаем старые апдейты (устраняет дубли)
+    await bot.set_webhook(
+        settings.WEBHOOK_URL,
+        drop_pending_updates=True,
+    )
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
