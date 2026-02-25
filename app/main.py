@@ -1,121 +1,114 @@
+import logging
 from fastapi import FastAPI, Request
-
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import Update, Message, ReplyKeyboardMarkup, KeyboardButton
-
-from aiogram.fsm.storage.memory import MemoryStorage
-
-from io import BytesIO
+from aiogram.types import Update, Message
+from aiogram.filters import CommandStart, Command
+from aiogram.enums import ParseMode
 
 from app.config import settings
-from app.deepseek import ask_text, solve_homework_vision
+from app.keyboards import main_menu
+from app.deepseek import ask_deepseek, ask_deepseek_vision
+from app.db import db
 
+# логирование
+logging.basicConfig(level=logging.INFO)
 
+# FastAPI
 app = FastAPI()
-api = app
 
-bot = Bot(token=settings.BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# Bot
+bot = Bot(
+    token=settings.BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
 
-# простой режим
-USER_MODE = {}  # user_id -> "any" | "photo"
-
-
-def menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📚 Помощь с дз"), KeyboardButton(text="📷 Фото → решить дз")],
-            [KeyboardButton(text="❓ Ответить на любой вопрос")],
-            [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="➕ Докупить")],
-            [KeyboardButton(text="👥 Реферальная программа")],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выбери пункт меню 👇",
-    )
+# Dispatcher
+dp = Dispatcher()
 
 
+# =========================
+# START COMMAND
+# =========================
 @dp.message(CommandStart())
-async def start_cmd(message: Message):
-    USER_MODE[message.from_user.id] = "any"
-    await message.answer("Привет! Выбери пункт меню 👇", reply_markup=menu_kb())
+async def start_handler(message: Message):
+    await db.ensure_user(message.from_user.id)
 
-
-@dp.message(F.text == "📷 Фото → решить дз")
-async def set_photo_mode(message: Message):
-    USER_MODE[message.from_user.id] = "photo"
     await message.answer(
-        "Отправь фото задачи 📷\n\n"
-        "Советы:\n"
-        "• лучше как *файл* (без сжатия)\n"
-        "• кадр ближе, без бликов и наклона",
-        parse_mode="Markdown",
-        reply_markup=menu_kb(),
+        "Привет! Выбери пункт меню 👇",
+        reply_markup=main_menu()
     )
 
 
-@dp.message(F.text.in_({"📚 Помощь с дз", "❓ Ответить на любой вопрос"}))
-async def set_any_mode(message: Message):
-    USER_MODE[message.from_user.id] = "any"
-    await message.answer("Ок! Напиши вопрос текстом — отвечу 👇", reply_markup=menu_kb())
-
-
-@dp.message(F.text.in_({"💎 Подписка", "👥 Реферальная программа", "➕ Докупить"}))
-async def stub(message: Message):
-    await message.answer(
-        "Этот раздел подключим следующим шагом.\n"
-        "Сейчас доступны: текстовые вопросы и решение по фото ✅",
-        reply_markup=menu_kb(),
-    )
-
-
-@dp.message(F.photo)
-async def photo_handler(message: Message):
-    await message.answer("📷 Принял фото. Решаю через Vision...")
-
-    try:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        buf = BytesIO()
-        await bot.download_file(file.file_path, destination=buf)
-        image_bytes = buf.getvalue()
-    except Exception as e:
-        await message.answer(f"❌ Не смог скачать фото: {e}", reply_markup=menu_kb())
-        return
-
-    answer = await solve_homework_vision(
-        image_bytes,
-        "Реши задачу с фото. Ответ дай обычным текстом, без LaTeX и без обратных слешей."
-    )
-    await message.answer(answer, reply_markup=menu_kb())
-
-
+# =========================
+# TEXT HANDLER
+# =========================
 @dp.message(F.text)
 async def text_handler(message: Message):
-    # игнорируем команды кроме /start
-    if message.text.startswith("/"):
-        return
+    try:
+        await message.answer("Думаю... 🤔")
 
-    await message.answer("🧠 Думаю...")
+        answer = await ask_deepseek(message.text)
 
-    answer = await ask_text(message.text)
-    await message.answer(answer, reply_markup=menu_kb())
+        await message.answer(answer)
+
+    except Exception as e:
+        logging.exception(e)
+        await message.answer("Ошибка при обработке запроса ❌")
 
 
+# =========================
+# PHOTO HANDLER (VISION)
+# =========================
+@dp.message(F.photo)
+async def photo_handler(message: Message):
+    try:
+        await message.answer("Анализирую фото... 📷")
+
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{settings.BOT_TOKEN}/{file.file_path}"
+
+        answer = await ask_deepseek_vision(file_url)
+
+        await message.answer(answer)
+
+    except Exception as e:
+        logging.exception(e)
+        await message.answer("Ошибка анализа фото ❌")
+
+
+# =========================
+# STARTUP
+# =========================
 @app.on_event("startup")
 async def on_startup():
-    # это лечит дубли, если сервис падал и Telegram накопил апдейты
-    await bot.set_webhook(settings.WEBHOOK_URL, drop_pending_updates=True)
+    logging.info("Starting bot...")
+
+    await db.connect()
+    await db.init()
+
+    await bot.set_webhook(
+        settings.WEBHOOK_URL,
+        drop_pending_updates=True
+    )
+
+    logging.info("Bot started!")
 
 
+# =========================
+# WEBHOOK
+# =========================
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
-    return {"ok": True
+    return {"ok": True}
 
 
+# =========================
+# ROOT
+# =========================
 @app.get("/")
 async def root():
     return {"status": "ok"}
