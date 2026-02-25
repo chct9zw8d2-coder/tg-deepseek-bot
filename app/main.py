@@ -1,135 +1,131 @@
 import logging
-from io import BytesIO
+import os
+import base64
 
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
-from aiogram.types import Update, Message, CallbackQuery
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.enums import ParseMode
 
 from app.config import settings
-from app.keyboards import main_menu
-from app.deepseek import ask_deepseek, ask_deepseek_vision
+from app.deepseek import ask_text as ask_deepseek_text, ask_vision as ask_deepseek_vision
 
 logging.basicConfig(level=logging.INFO)
 
+BOT_TOKEN = settings.BOT_TOKEN
+WEBHOOK_URL = settings.WEBHOOK_URL
+
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
+
 app = FastAPI()
 
-bot = Bot(token=settings.BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
 
-USER_MODE = {}  # user_id -> "hw" | "any" | "photo"
+# ================= MENU =================
 
+def main_menu():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Решить задачу", callback_data="menu:solve")],
+        [InlineKeyboardButton(text="💬 Задать вопрос", callback_data="menu:ask")],
+        [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu:help")],
+    ])
+    return keyboard
+
+
+# ================= START =================
 
 @dp.message(CommandStart())
-async def start_cmd(message: Message):
-    USER_MODE[message.from_user.id] = "any"
-    await message.answer("Привет! Выбери пункт меню 👇", reply_markup=main_menu())
+async def cmd_start(message: types.Message):
+    logging.info(f"START from {message.from_user.id}")
+
+    await message.answer(
+        "Привет! Выбери пункт меню 👇",
+        reply_markup=main_menu()
+    )
 
 
-@dp.callback_query(F.data.startswith("menu:"))
-async def menu_router(cb: CallbackQuery):
-    logging.info(f"CALLBACK from {cb.from_user.id}: {cb.data}")
+# ================= CALLBACK MENU =================
 
-    action = cb.data.split(":", 1)[1]
-    uid = cb.from_user.id
+@dp.callback_query()
+async def handle_callback(callback: types.CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
 
-    if action == "hw":
-        USER_MODE[uid] = "hw"
-        await cb.message.answer("📚 Напиши задание текстом — решу и объясню 👇", reply_markup=main_menu())
+    logging.info(f"CALLBACK from {user_id}: {data}")
 
-    elif action == "photo":
-        USER_MODE[uid] = "photo"
-        await cb.message.answer("📷 Пришли фото задачи — решу через Vision ✅", reply_markup=main_menu())
-
-    elif action == "any":
-        USER_MODE[uid] = "any"
-        await cb.message.answer("❓ Задай любой вопрос — отвечу 👇", reply_markup=main_menu())
-
-    elif action == "sub":
-        await cb.message.answer(
-            "💎 Подписка на месяц:\n"
-            "1) Старт — 50 запросов/сутки — 199 ⭐\n"
-            "2) Про — 100 запросов/сутки — 350 ⭐\n"
-            "3) Премиум — 200 запросов/сутки — 700 ⭐\n\n"
-            "Оплата Stars подключим следующим шагом.",
-            reply_markup=main_menu()
+    if data == "menu:solve":
+        await callback.message.answer(
+            "📸 Отправь фото задачи, и я решу её"
         )
 
-    elif action == "ref":
-        await cb.message.answer("👥 Реферальная программа — подключим следующим шагом.", reply_markup=main_menu())
-
-    elif action == "topup":
-        await cb.message.answer(
-            "➕ Докупить запросы:\n"
-            "+10 запросов — 99 ⭐\n"
-            "+50 запросов — 150 ⭐\n\n"
-            "Оплата Stars подключим следующим шагом.",
-            reply_markup=main_menu()
+    elif data == "menu:ask":
+        await callback.message.answer(
+            "✏️ Напиши свой вопрос"
         )
 
-    await cb.answer()  # обязательно, иначе Telegram “крутит”
+    elif data == "menu:help":
+        await callback.message.answer(
+            "Я могу:\n"
+            "• решать задачи по фото\n"
+            "• отвечать на вопросы\n"
+            "• помогать с учебой"
+        )
+
+    await callback.answer()
 
 
-@dp.message(F.photo)
-async def handle_photo(message: Message):
-    uid = message.from_user.id
-    mode = USER_MODE.get(uid, "any")
+# ================= PHOTO HANDLER =================
 
-    # даже если режим не photo — всё равно решаем фото
-    await message.answer("📷 Принял фото. Решаю...")
+@dp.message(lambda message: message.photo)
+async def handle_photo(message: types.Message):
+    logging.info(f"PHOTO from {message.from_user.id}")
 
     photo = message.photo[-1]
+
     file = await bot.get_file(photo.file_id)
+    file_bytes = await bot.download_file(file.file_path)
 
-    buf = BytesIO()
-    await bot.download_file(file.file_path, destination=buf)
-    image_bytes = buf.getvalue()
+    image_bytes = file_bytes.read()
 
-    prompt = "Реши задачу с фото. Пиши обычным текстом, без LaTeX. Дай итоговый ответ в конце."
-    answer = await ask_deepseek_vision(image_bytes, prompt)
+    await message.answer("🔍 Анализирую изображение...")
 
-    await message.answer(answer, reply_markup=main_menu())
+    answer = await ask_deepseek_vision(image_bytes)
 
-
-@dp.message(F.text)
-async def handle_text(message: Message):
-    if message.text.startswith("/"):
-        return
-
-    uid = message.from_user.id
-    mode = USER_MODE.get(uid, "any")
-
-    if mode == "hw":
-        prompt = (
-            "Реши задачу и объясни кратко.\n"
-            "Пиши обычным текстом, без LaTeX.\n"
-            "Формат: Решение -> Ответ.\n\n"
-            f"Задача:\n{message.text}"
-        )
-    else:
-        prompt = message.text
-
-    await message.answer("Думаю... 🤔")
-    answer = await ask_deepseek(prompt)
-    await message.answer(answer, reply_markup=main_menu())
+    await message.answer(answer)
 
 
-@app.on_event("startup")
-async def on_startup():
-    logging.info("Setting webhook...")
-    await bot.set_webhook(settings.WEBHOOK_URL, drop_pending_updates=True)
-    logging.info("Webhook set.")
+# ================= TEXT HANDLER =================
 
+@dp.message()
+async def handle_text(message: types.Message):
+    text = message.text
+
+    logging.info(f"TEXT from {message.from_user.id}: {text}")
+
+    answer = await ask_deepseek_text(text)
+
+    await message.answer(answer)
+
+
+# ================= WEBHOOK =================
 
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    update = Update.model_validate(data)
+    update = types.Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
 
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+# ================= STARTUP =================
+
+@app.on_event("startup")
+async def on_startup():
+    logging.info("Setting webhook...")
+    await bot.set_webhook(WEBHOOK_URL)
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bot.delete_webhook()
