@@ -1,40 +1,29 @@
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.filters import CommandStart
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Update
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import settings
-from app.deepseek import ask_deepseek
-from app.ocr import ocr_image_bytes
 
-api = FastAPI()
-bot = Bot(settings.BOT_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
+app = FastAPI()
 
-@dp.message(CommandStart())
-async def start(message: Message):
-    await message.answer("Бот работает. Напиши вопрос или отправь фото.")
+bot = Bot(token=settings.BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
-@dp.message(F.photo)
-async def photo(message: Message):
-    file = await bot.get_file(message.photo[-1].file_id)
-    f = await bot.download_file(file.file_path)
-    text = ocr_image_bytes(f.read())
-    answer = await ask_deepseek("Реши задачу: " + text, reason=True)
-    await message.answer(answer)
 
 @dp.message()
-async def text(message: Message):
-    answer = await ask_deepseek(message.text)
-    await message.answer(answer)
+async def handle_message(message: types.Message):
+    await message.answer("Бот работает ✅")
 
-@api.on_event("startup")
-async def startup():
-    await bot.set_webhook(settings.WEBHOOK_URL)
 
-@api.post("/webhook")
-async def webhook(req: Request):
-    data = await req.json()
-    await dp.feed_webhook_update(bot, data)
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.model_validate(data)
+    await dp.feed_update(bot, update)
     return {"ok": True}
+
+
+@app.get("/")
+async def root():
+    return {"status": "ok"}
