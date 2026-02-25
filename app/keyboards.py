@@ -1,4 +1,3 @@
-
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -9,33 +8,24 @@ def main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💳 Подписка"), KeyboardButton(text="🎁 Реферальная программа")],
             [KeyboardButton(text="➕ Докупить")],
         ],
-        resize_keyboard=True,
-        input_field_placeholder="Выбери пункт меню или напиши вопрос…",
+        resize_keyboard=True
     )
 
-def subscription_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
-    if is_admin:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Вам доступно бесплатно (админ)", callback_data="noop")]
-        ])
+def back_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⬅️ Назад в меню")]],
+        resize_keyboard=True
+    )
+
+def sub_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Старт — 199⭐ / день (50)", callback_data="buy:sub:starter")],
-        [InlineKeyboardButton(text="Про — 350⭐ / день (100)", callback_data="buy:sub:pro")],
-        [InlineKeyboardButton(text="Премиум — 700⭐ / день (200)", callback_data="buy:sub:premium")],
+        [InlineKeyboardButton(text="⭐ Старт — 199 (50/день, 30 дней)", callback_data="sub:start")],
+        [InlineKeyboardButton(text="⭐ Про — 350 (100/день, 30 дней)", callback_data="sub:pro")],
+        [InlineKeyboardButton(text="⭐ Премиум — 700 (200/день, 30 дней)", callback_data="sub:premium")],
     ])
 
-def topup_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
-    if is_admin:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Вам доступно бесплатно (админ)", callback_data="noop")]
-        ])
+def topup_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="+10 запросов — 99⭐", callback_data="buy:topup:10")],
-        [InlineKeyboardButton(text="+50 запросов — 150⭐", callback_data="buy:topup:50")],
-    ])
-
-def admin_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="🎁 Выдать кредиты", callback_data="admin:grant")],
+        [InlineKeyboardButton(text="➕ +10 запросов — 99⭐", callback_data="topup:10")],
+        [InlineKeyboardButton(text="➕ +50 запросов — 150⭐", callback_data="topup:50")],
     ])
