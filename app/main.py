@@ -16,7 +16,7 @@ from io import BytesIO
 
 from app.config import settings
 from app.deepseek import ask_deepseek, solve_homework_from_text
-from app.ocr import ocr_image  # <-- добавь файл app/ocr.py (ниже)
+from app.ocr import ocr_image
 
 
 app = FastAPI()
@@ -25,16 +25,16 @@ api = app
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# режим пользователя
+# "hw" — помощь с дз (структурированный ответ)
+# "any" — любой вопрос
+# "photo" — решение по фото
+USER_MODE = {}
 
-# ----------------------------
-# Простая "модальность" по пользователю
-# ----------------------------
-USER_MODE = {}  # user_id -> "hw" | "any" | "photo"
 
-
-# ----------------------------
-# Inline menu (видно в Telegram Web)
-# ----------------------------
+# =========================
+# INLINE MENU
+# =========================
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -48,6 +48,9 @@ def main_menu() -> InlineKeyboardMarkup:
     )
 
 
+# =========================
+# START
+# =========================
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
@@ -58,13 +61,13 @@ async def start_cmd(message: Message, state: FSMContext):
     )
 
 
-# ----------------------------
-# CALLBACKS
-# ----------------------------
+# =========================
+# CALLBACK HANDLERS
+# =========================
 @dp.callback_query(F.data == "menu:hw")
 async def cb_hw(cb: CallbackQuery):
     USER_MODE[cb.from_user.id] = "hw"
-    await cb.message.answer("📚 Напиши задание текстом — решу и объясню (обычным текстом, без LaTeX) 👇")
+    await cb.message.answer("📚 Напиши задание текстом — решу и объясню (обычным текстом) 👇")
     await cb.answer()
 
 
@@ -72,8 +75,11 @@ async def cb_hw(cb: CallbackQuery):
 async def cb_photo(cb: CallbackQuery):
     USER_MODE[cb.from_user.id] = "photo"
     await cb.message.answer(
-        "📷 Пришли фото задачи.\n"
-        "Совет: лучше отправлять как *файл* (без сжатия) — так распознаёт намного точнее.",
+        "📷 Пришли фото задачи.\n\n"
+        "Советы для лучшего распознавания:\n"
+        "1) Лучше отправить как *файл* (без сжатия)\n"
+        "2) Кадр ближе (задача занимает 80–90% кадра)\n"
+        "3) Без бликов и наклона",
         parse_mode="Markdown",
     )
     await cb.answer()
@@ -93,7 +99,7 @@ async def cb_sub(cb: CallbackQuery):
         "Старт — 50 запросов/сутки — 199 ⭐\n"
         "Про — 100 запросов/сутки — 350 ⭐\n"
         "Премиум — 200 запросов/сутки — 700 ⭐\n\n"
-        "Подключим оплату Stars на следующем шаге."
+        "Оплату Stars подключим на следующем шаге."
     )
     await cb.answer()
 
@@ -110,82 +116,80 @@ async def cb_topup(cb: CallbackQuery):
         "➕ Докупить запросы:\n\n"
         "+10 запросов — 99 ⭐\n"
         "+50 запросов — 150 ⭐\n\n"
-        "Подключим оплату Stars на следующем шаге."
+        "Оплату Stars подключим на следующем шаге."
     )
     await cb.answer()
 
 
-# ----------------------------
+# =========================
 # PHOTO HANDLER (OCR -> DeepSeek)
-# ----------------------------
+# =========================
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    # Если пользователь не выбирал режим, всё равно попробуем решить
-    mode = USER_MODE.get(message.from_user.id, "photo")
-
     await message.answer("📷 Принял фото. Распознаю текст...")
 
-    # Берем самое большое фото
-    photo = message.photo[-1]
-
+    photo = message.photo[-1]  # самое большое фото
     file = await bot.get_file(photo.file_id)
+
     buf = BytesIO()
     await bot.download_file(file.file_path, destination=buf)
     image_bytes = buf.getvalue()
 
-    text = ocr_image(image_bytes)
+    ocr_text = ocr_image(image_bytes)
 
-    if len(text) < 10:
+    if len(ocr_text) < 10:
         await message.answer(
-            "Не получилось нормально распознать текст 😕\n"
+            "Не получилось нормально распознать текст 😕\n\n"
             "Попробуй:\n"
             "1) отправить фото как *файл* (без сжатия)\n"
-            "2) кадр ближе (задача занимает 80–90% кадра)\n"
-            "3) без бликов/наклона",
+            "2) сфоткать ближе\n"
+            "3) убрать блики/наклон",
             parse_mode="Markdown",
         )
         return
 
     await message.answer("✅ Текст распознал. Решаю...")
 
-    # Решение по OCR тексту, без LaTeX
-    answer = await solve_homework_from_text(text)
+    answer = await solve_homework_from_text(ocr_text)
     await message.answer(answer)
 
 
-# ----------------------------
+# =========================
 # TEXT HANDLER (DeepSeek)
-# ----------------------------
+# =========================
 @dp.message(F.text)
 async def handle_text(message: Message):
-    # команды типа /start не трогаем
+    # команды игнорируем, чтобы не было дублей
     if message.text.startswith("/"):
         return
 
     mode = USER_MODE.get(message.from_user.id, "any")
 
-    # Для "Помощь с дз" — отвечаем более структурировано, но без LaTeX
     if mode == "hw":
         prompt = (
-            "Реши и объясни задачу. Пиши обычным текстом, без LaTeX и без слешей.\n"
-            "Структура: Условие / Решение / Ответ.\n\n"
+            "Реши и объясни задачу.\n"
+            "Пиши обычным текстом (без LaTeX).\n"
+            "Структура:\n"
+            "Условие:\n"
+            "Решение:\n"
+            "Ответ:\n\n"
             f"Задача:\n{message.text}"
         )
         answer = await ask_deepseek(prompt)
         await message.answer(answer)
         return
 
-    # Для "любой вопрос" — просто ответ
+    # режим any (любой вопрос)
     answer = await ask_deepseek(message.text)
     await message.answer(answer)
 
 
-# ----------------------------
+# =========================
 # WEBHOOK
-# ----------------------------
+# =========================
 @app.on_event("startup")
 async def on_startup():
-    # Убирает накопленные /start и дубли после падений
+    # убирает накопленные апдейты (дубли /start после падений)
     await bot.set_webhook(settings.WEBHOOK_URL, drop_pending_updates=True)
 
 
