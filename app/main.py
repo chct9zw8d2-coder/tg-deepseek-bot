@@ -1,59 +1,43 @@
+from fastapi import FastAPI, Request
 import os
 import logging
-from fastapi import FastAPI, Request, Response
-from aiogram import Bot, Dispatcher
-from aiogram.types import Update
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
-from app.bot import router
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set")
-
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
-
-dp = Dispatcher()
-dp.include_router(router)
+# импорт твоих модулей (оставь если уже есть)
+from app.config import BOT_TOKEN
+from app.deepseek import ask_deepseek
+from app.db import init_db
+from app.keyboards import get_main_keyboard
 
 app = FastAPI()
 
+logging.basicConfig(level=logging.INFO)
 
+
+# ✅ ЭТОТ ENDPOINT НУЖЕН ДЛЯ RAILWAY (убирает 502)
 @app.get("/")
 async def root():
     return {"status": "ok"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-
+# webhook endpoint
 @app.post("/webhook")
 async def webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.model_validate(data)
-        await dp.feed_update(bot, update)
-        return Response(status_code=200)
-    except Exception as e:
-        logger.exception("Webhook error:")
-        return Response(status_code=200)
+    data = await request.json()
+    logging.info(f"Webhook received: {data}")
+
+    # здесь твоя логика бота
+    return {"ok": True}
 
 
+# startup event
 @app.on_event("startup")
 async def startup():
-    logger.info("Bot started")
+    logging.info("Starting application...")
+    await init_db()
+    logging.info("Application startup complete.")
 
 
+# shutdown event
 @app.on_event("shutdown")
 async def shutdown():
-    await bot.session.close()
+    logging.info("Application shutdown complete.")
