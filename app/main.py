@@ -1,8 +1,7 @@
 # app/main.py
-import base64
-import logging
 import os
-from typing import Optional
+import logging
+from typing import Callable, Awaitable, Optional
 
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, Router, F
@@ -10,77 +9,174 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import (
     Message,
+    CallbackQuery,
     Update,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
-
-from app.deepseek import ask_deepseek_text, ask_deepseek_vision
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tg-bot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например: https://xxx.up.railway.app/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://<service>.up.railway.app/webhook
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 if not WEBHOOK_URL:
     raise RuntimeError("WEBHOOK_URL is not set (example: https://<service>.up.railway.app/webhook)")
 
+# --- Try to import DeepSeek helpers with fallback names ---
+ask_deepseek_text: Optional[Callable[[str], Awaitable[str]]] = None
+ask_deepseek_vision: Optional[Callable[[str, bytes], Awaitable[str]]] = None
+
+try:
+    # варианты имен, которые у тебя встречались в логах/правках
+    from app.deepseek import ask_deepseek_text as _t  # type: ignore
+    ask_deepseek_text = _t
+except Exception:
+    try:
+        from app.deepseek import ask_text as _t  # type: ignore
+        ask_deepseek_text = _t
+    except Exception:
+        try:
+            from app.deepseek import ask_deepseek as _t  # type: ignore
+            ask_deepseek_text = _t
+        except Exception:
+            ask_deepseek_text = None
+
+try:
+    from app.deepseek import ask_deepseek_vision as _v  # type: ignore
+    ask_deepseek_vision = _v
+except Exception:
+    try:
+        from app.deepseek import ask_vision as _v  # type: ignore
+        ask_deepseek_vision = _v
+    except Exception:
+        try:
+            from app.deepseek import ask_deepseek_vl as _v  # type: ignore
+            ask_deepseek_vision = _v
+        except Exception:
+            ask_deepseek_vision = None
+
+
+# --- Bot / Dispatcher ---
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🧠 Спросить (текст)", callback_data="mode:text"),
+            InlineKeyboardButton(text="👁️ Спросить (фото)", callback_data="mode:vision"),
+        ],
+        [
+            InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help"),
+        ],
+    ])
+
+
+@router.message(F.text.in_({"/start", "start"}))
+async def cmd_start(message: Message):
+    text = (
+        "Привет! Я бот.\n\n"
+        "Выбери режим:\n"
+        "🧠 <b>Текст</b> — задаёшь вопрос текстом\n"
+        "👁️ <b>Фото</b> — присылаешь фото + вопрос\n"
+    )
+    await message.answer(text, reply_markup=main_menu())
+
+
+@router.callback_query(F.data == "help")
+async def cb_help(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer(
+        "Как пользоваться:\n"
+        "1) Нажми 🧠 и задай вопрос текстом\n"
+        "2) Нажми 👁️ и пришли фото с подписью-вопросом\n"
+    )
+
+
+# simple mode flags in memory (на один инстанс)
+USER_MODE: dict[int, str] = {}
+
+
+@router.callback_query(F.data.startswith("mode:"))
+async def cb_mode(call: CallbackQuery):
+    await call.answer()
+    mode = call.data.split(":", 1)[1]
+    USER_MODE[call.from_user.id] = mode
+    if mode == "text":
+        await call.message.answer("Ок, режим 🧠. Напиши вопрос текстом.")
+    else:
+        await call.message.answer("Ок, режим 👁️. Пришли фото с подписью-вопросом (caption).")
+
+
+@router.message(F.photo)
+async def on_photo(message: Message):
+    mode = USER_MODE.get(message.from_user.id, "vision")
+    if mode != "vision":
+        await message.answer("Сейчас включён режим 🧠. Нажми 👁️ в меню, если хочешь разбор фото.")
+        return
+
+    if ask_deepseek_vision is None:
+        await message.answer("Vision-функция не подключилась в коде (нет подходящей функции в app/deepseek.py).")
+        return
+
+    caption = (message.caption or "").strip()
+    if not caption:
+        caption = "Опиши, что на фото, и реши задачу/объясни."
+
+    # скачать фото
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    data = await bot.download_file(file.file_path)
+    img_bytes = data.read()
+
+    await message.answer("⏳ Думаю по фото...")
+    try:
+        reply = await ask_deepseek_vision(caption, img_bytes)
+    except Exception as e:
+        logger.exception("Vision request failed")
+        await message.answer(f"Ошибка vision-запроса: {e}")
+        return
+
+    await message.answer(reply)
+
+
+@router.message(F.text)
+async def on_text(message: Message):
+    mode = USER_MODE.get(message.from_user.id, "text")
+    if mode != "text":
+        # если человек написал текст, но режим vision — всё равно отвечаем текстом, чтобы “не молчало”
+        mode = "text"
+
+    if ask_deepseek_text is None:
+        await message.answer("Text-функция не подключилась в коде (нет подходящей функции в app/deepseek.py).")
+        return
+
+    question = message.text.strip()
+    await message.answer("⏳ Думаю...")
+    try:
+        reply = await ask_deepseek_text(question)
+    except Exception as e:
+        logger.exception("Text request failed")
+        await message.answer(f"Ошибка text-запроса: {e}")
+        return
+
+    await message.answer(reply)
+
+
+# --- FastAPI app ---
 app = FastAPI()
-
-# --- Кнопки меню (ReplyKeyboard) ---
-BTN_SOLVE_TEXT = "📝 Решить (текст)"
-BTN_SOLVE_PHOTO = "📷 Решить (фото)"
-BTN_HELP = "ℹ️ Помощь"
-
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text=BTN_SOLVE_TEXT), KeyboardButton(text=BTN_SOLVE_PHOTO)],
-        [KeyboardButton(text=BTN_HELP)],
-    ],
-    resize_keyboard=True,
-    selective=False,
-)
-
-# Простейшее состояние "ждём фото?"
-WAITING_PHOTO_USERS: set[int] = set()
 
 
 @app.get("/")
-async def root():
-    return {"status": "ok"}
-
-
-@app.get("/health")
 async def health():
-    return {"ok": True}
-
-
-@app.on_event("startup")
-async def on_startup():
-    # ставим webhook один раз при старте
-    logger.info("Setting webhook...")
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-    logger.info("Webhook set OK")
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    # снимаем webhook
-    logger.info("Removing webhook...")
-    try:
-        await bot.delete_webhook(drop_pending_updates=False)
-    except Exception:
-        pass
-    await bot.session.close()
-    logger.info("Shutdown complete")
+    return {"status": "ok"}
 
 
 @app.post("/webhook")
@@ -91,89 +187,16 @@ async def webhook(request: Request):
     return {"ok": True}
 
 
-@router.message(F.text == "/start")
-async def cmd_start(message: Message):
-    WAITING_PHOTO_USERS.discard(message.from_user.id)
-    await message.answer(
-        "Привет! Выбери режим:\n"
-        "📝 <b>текст</b> — вставь задание\n"
-        "📷 <b>фото</b> — пришли фото задания\n",
-        reply_markup=main_kb,
-    )
+@app.on_event("startup")
+async def on_startup():
+    # ставим webhook
+    logger.info("Setting webhook...")
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info("Webhook set OK")
 
 
-@router.message(F.text == BTN_HELP)
-async def help_cmd(message: Message):
-    WAITING_PHOTO_USERS.discard(message.from_user.id)
-    await message.answer(
-        "Как пользоваться:\n"
-        "1) 📝 Решить (текст) — отправь текст задания.\n"
-        "2) 📷 Решить (фото) — нажми и отправь фото.\n\n"
-        "Я стараюсь писать ответ <b>обычным текстом</b> без LaTeX-кавычек.",
-        reply_markup=main_kb,
-    )
-
-
-@router.message(F.text == BTN_SOLVE_TEXT)
-async def solve_text_mode(message: Message):
-    WAITING_PHOTO_USERS.discard(message.from_user.id)
-    await message.answer(
-        "Ок! Пришли текст задания одним сообщением 👇",
-        reply_markup=main_kb,
-    )
-
-
-@router.message(F.text == BTN_SOLVE_PHOTO)
-async def solve_photo_mode(message: Message):
-    WAITING_PHOTO_USERS.add(message.from_user.id)
-    await message.answer("Ок! Пришли фото задания 👇", reply_markup=main_kb)
-
-
-@router.message(F.photo)
-async def on_photo(message: Message):
-    # Если пользователь не нажимал "фото режим" — всё равно обработаем, это удобнее
-    user_id = message.from_user.id
-    WAITING_PHOTO_USERS.discard(user_id)
-
-    await message.answer("Считываю фото и решаю… ⏳")
-
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    img_bytes = file_bytes.read()
-
-    # подпись к фото как подсказка
-    prompt = (message.caption or "").strip()
-    if not prompt:
-        prompt = "Распознай задание на изображении и реши. Ответ дай обычным текстом, без LaTeX скобок типа \\( \\) и \\[ \\]."
-
-    try:
-        answer = await ask_deepseek_vision(prompt=prompt, image_bytes=img_bytes, mime="image/jpeg")
-    except Exception as e:
-        logger.exception("Vision error")
-        await message.answer(f"Ошибка vision: {e}")
-        return
-
-    await message.answer(answer, reply_markup=main_kb)
-
-
-@router.message(F.text)
-async def on_text(message: Message):
-    text = (message.text or "").strip()
-    if not text:
-        return
-
-    # если человек нажал "фото режим" но прислал текст — подскажем
-    if message.from_user.id in WAITING_PHOTO_USERS:
-        await message.answer("Я жду фото 🙂 Пришли фото задания.")
-        return
-
-    await message.answer("Думаю… ⏳")
-    try:
-        answer = await ask_deepseek_text(prompt=text)
-    except Exception as e:
-        logger.exception("Text error")
-        await message.answer(f"Ошибка text: {e}")
-        return
-
-    await message.answer(answer, reply_markup=main_kb)
+# ВАЖНО: на shutdown webhook можно НЕ снимать, чтобы не было “мигания” при рестартах Railway
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Closing bot session...")
+    await bot.session.close()
