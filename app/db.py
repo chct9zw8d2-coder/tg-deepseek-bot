@@ -2,13 +2,19 @@ import asyncpg
 from datetime import datetime, timedelta, date
 from typing import Optional, Tuple
 
+
 class DB:
     def __init__(self, dsn: str):
         self.dsn = dsn
         self.pool: Optional[asyncpg.Pool] = None
 
     async def connect(self):
-        self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
+        # Railway иногда даёт SQLAlchemy-style URL: postgresql+asyncpg://...
+        dsn = (self.dsn or "").strip()
+        dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
+        dsn = dsn.replace("postgres+asyncpg://", "postgres://")
+
+        self.pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
 
     async def close(self):
         if self.pool:
@@ -70,9 +76,11 @@ class DB:
             row = await con.fetchrow("SELECT id, referrer_id FROM users WHERE id=$1", user_id)
             if row is None:
                 await con.execute("INSERT INTO users(id, referrer_id) VALUES($1, $2)", user_id, referrer_id)
-                await con.execute("INSERT INTO topups(user_id, remaining) VALUES($1, 0) ON CONFLICT DO NOTHING", user_id)
+                await con.execute(
+                    "INSERT INTO topups(user_id, remaining) VALUES($1, 0) ON CONFLICT DO NOTHING",
+                    user_id
+                )
             else:
-                # если реферер задан и у пользователя его ещё нет — сохраняем
                 if referrer_id and row["referrer_id"] is None and referrer_id != user_id:
                     await con.execute("UPDATE users SET referrer_id=$2 WHERE id=$1", user_id, referrer_id)
 
@@ -133,6 +141,7 @@ class DB:
     async def consume_request(self, user_id: int, is_admin: bool) -> Tuple[bool, str]:
         """
         Списывает 1 запрос. Возвращает (ok, message).
+
         Логика:
         - админ: всегда ok
         - если есть подписка: тратим дневной лимит
@@ -155,7 +164,6 @@ class DB:
             if sub:
                 daily_limit = int(sub["daily_limit"])
                 if used_today < daily_limit:
-                    # increment daily usage
                     await con.execute("""
                         INSERT INTO usage_daily(user_id, day, used) VALUES($1, $2, 1)
                         ON CONFLICT (user_id, day) DO UPDATE SET used = usage_daily.used + 1
@@ -172,7 +180,14 @@ class DB:
             return False, "no_quota"
 
     # ---------- payments + referral earnings ----------
-    async def add_payment(self, user_id: int, kind: str, amount_xtr: int, tg_charge_id: str = None, provider_charge_id: str = None):
+    async def add_payment(
+        self,
+        user_id: int,
+        kind: str,
+        amount_xtr: int,
+        tg_charge_id: str = None,
+        provider_charge_id: str = None
+    ):
         assert self.pool
         async with self.pool.acquire() as con:
             await con.execute("""
