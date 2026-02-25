@@ -5,7 +5,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import settings
 
-api = FastAPI()  # ВАЖНО: Railway ищет app.main:api
+app = FastAPI()
 
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -16,7 +16,13 @@ async def handle_message(message: types.Message):
     await message.answer("Бот работает ✅")
 
 
-@api.post("/webhook")
+@app.on_event("startup")
+async def on_startup():
+    # Ставим webhook при старте
+    await bot.set_webhook(settings.WEBHOOK_URL)
+
+
+@app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
@@ -24,12 +30,6 @@ async def webhook(request: Request):
     return {"ok": True}
 
 
-@api.get("/")
+@app.get("/")
 async def root():
     return {"status": "ok"}
-
-
-@api.on_event("startup")
-async def on_startup():
-    # ставим webhook при запуске
-    await bot.set_webhook(settings.WEBHOOK_URL)
