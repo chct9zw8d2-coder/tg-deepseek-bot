@@ -1,34 +1,64 @@
 import os
 import logging
+
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, types
 from aiogram.types import Update
 from aiogram.filters import CommandStart
-from aiogram.types import Message
 
+# =====================
+# ЛОГИ
+# =====================
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# =====================
+# ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например: https://tg-deepseek-bot-production.up.railway.app/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
+    raise ValueError("BOT_TOKEN not set")
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-router = Router()
+if not WEBHOOK_URL:
+    raise ValueError("WEBHOOK_URL not set")
 
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_FULL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
 
-@router.message(CommandStart())
-async def start_handler(message: Message):
-    # простое меню/ответ
-    await message.answer("Меню: \n1) ... \n2) ...")
-
-dp.include_router(router)
-
+# =====================
+# FASTAPI
+# =====================
 app = FastAPI()
 
+# =====================
+# TELEGRAM
+# =====================
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
+
+# =====================
+# HANDLERS
+# =====================
+@dp.message(CommandStart())
+async def start_handler(message: types.Message):
+    await message.answer(
+        "👋 Привет!\n\n"
+        "Бот работает через Railway webhook.\n"
+        "Отправь сообщение."
+    )
+
+
+@dp.message()
+async def echo_handler(message: types.Message):
+    await message.answer(f"Ты написал:\n{message.text}")
+
+
+# =====================
+# HEALTHCHECK
+# =====================
 @app.get("/")
 async def root():
     return {"status": "ok"}
@@ -39,23 +69,48 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
+# =====================
+# WEBHOOK ENDPOINT
+# =====================
+@app.post(WEBHOOK_PATH)
+async def webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
 
 
+# =====================
+# STARTUP
+# =====================
 @app.on_event("startup")
 async def on_startup():
-    if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"Webhook set to: {WEBHOOK_URL}")
-    else:
-        logging.warning("WEBHOOK_URL is not set, webhook will NOT be configured")
+    logger.info("Bot starting...")
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_FULL)
+
+    logger.info(f"Webhook set to: {WEBHOOK_FULL}")
 
 
+# =====================
+# SHUTDOWN
+# =====================
 @app.on_event("shutdown")
 async def on_shutdown():
+    logger.info("Bot shutdown")
     await bot.session.close()
+
+
+# =====================
+# LOCAL RUN ONLY
+# =====================
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+    )
