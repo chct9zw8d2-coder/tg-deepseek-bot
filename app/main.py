@@ -1,72 +1,36 @@
 import os
 import logging
-
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Update
 from aiogram.filters import CommandStart
-from aiogram.types import Message, Update
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-
+import uvicorn
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например: https://xxxxx.up.railway.app/webhook
-WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
-if not WEBHOOK_URL:
-    raise RuntimeError("WEBHOOK_URL is not set")
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-
-# --- Aiogram ---
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
-dp = Dispatcher(storage=MemoryStorage())
-
-router = Router()
-
-
-def main_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📚 Учёба"), KeyboardButton(text="🧠 Спросить ИИ")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="💳 Подписка")],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите действие…",
-    )
-
-
-@router.message(CommandStart())
-async def cmd_start(message: Message):
-    await message.answer(
-        "Привет! 👋\nВот меню:",
-        reply_markup=main_menu_kb(),
-    )
-
-
-dp.include_router(router)
-
-
-# --- FastAPI ---
 app = FastAPI()
 
 
-@app.get("/")
-async def health():
-    return {"ok": True}
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="💬 Чат")],
+            [types.KeyboardButton(text="🧠 Vision")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("Выберите режим:", reply_markup=keyboard)
 
 
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
+@app.post("/webhook")
+async def webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
@@ -75,14 +39,14 @@ async def telegram_webhook(request: Request):
 
 @app.on_event("startup")
 async def on_startup():
-    # ставим webhook на WEBHOOK_URL (он должен заканчиваться на /webhook)
     await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook set to: {WEBHOOK_URL}")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    # снимаем webhook и закрываем сессию
-    await bot.delete_webhook(drop_pending_updates=False)
-    await bot.session.close()
-    logging.info("Webhook deleted, bot session closed")
+    await bot.delete_webhook()
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
