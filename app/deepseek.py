@@ -1,102 +1,81 @@
-# app/deepseek.py
+from __future__ import annotations
 import base64
-import os
-import aiohttp
+import httpx
+from app.config import settings
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-DEEPSEEK_TEXT_MODEL = os.getenv("DEEPSEEK_TEXT_MODEL", "deepseek-chat")
-DEEPSEEK_VISION_MODEL = os.getenv("DEEPSEEK_VISION_MODEL", "deepseek-vl2")
+def _clean_answer(text: str) -> str:
+    # Make it nice for Telegram: remove leading blockquote markers and code fences
+    lines = []
+    in_fence = False
+    for ln in (text or "").splitlines():
+        s = ln.rstrip()
+        if s.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if s.lstrip().startswith(">"):
+            s = s.lstrip()[1:].lstrip()
+        lines.append(s)
+    out = "\n".join(lines).strip()
+    return out
 
-if not DEEPSEEK_API_KEY:
-    raise RuntimeError("DEEPSEEK_API_KEY is not set")
+async def _chat_completion(messages, *, base_url: str, api_key: str, model: str, timeout: float = 60.0) -> str:
+    url = base_url.rstrip("/") + "/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {"model": model, "messages": messages, "temperature": 0.3}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+    return data["choices"][0]["message"]["content"]
 
+async def answer_any_question(question: str) -> str:
+    messages = [
+        {"role": "system", "content": "Ты полезный ассистент. Отвечай подробно, понятно, структурировано. Не используй блок-цитаты '>' и не используй тройные кавычки ```."},
+        {"role": "user", "content": question},
+    ]
+    text = await _chat_completion(messages, base_url=settings.DEEPSEEK_BASE_URL, api_key=settings.DEEPSEEK_API_KEY, model=settings.DEEPSEEK_TEXT_MODEL)
+    return _clean_answer(text)
 
-def _endpoint() -> str:
-    # DeepSeek обычно совместим с OpenAI-style: /v1/chat/completions
-    return f"{DEEPSEEK_BASE_URL}/v1/chat/completions"
+async def solve_homework_text(task: str) -> str:
+    messages = [
+        {"role": "system", "content": "Ты репетитор. Помоги решить домашнее задание: объясняй шаги, формулы, но пиши компактно. В конце выдели 'Ответ: ...'. Не используй '>' и ```."},
+        {"role": "user", "content": task},
+    ]
+    text = await _chat_completion(messages, base_url=settings.DEEPSEEK_BASE_URL, api_key=settings.DEEPSEEK_API_KEY, model=settings.DEEPSEEK_TEXT_MODEL)
+    return _clean_answer(text)
 
+async def solve_homework_image(image_bytes: bytes, ocr_text: str) -> str:
+    # If user has a vision endpoint configured, use it; otherwise use OCR text.
+    if settings.DEEPSEEK_VISION_BASE_URL and settings.DEEPSEEK_VISION_MODEL:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:image/jpeg;base64,{b64}"
+        messages = [
+            {"role": "system", "content": "Ты решаешь задачи по фото. Сначала аккуратно перепиши условие, затем реши, затем отдельно дай финальный ответ. Не используй '>' и ```."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Реши задачу с изображения. Сначала перепиши условие (без ошибок), потом решение, потом финальный ответ."},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+        ]
+        text = await _chat_completion(
+            messages,
+            base_url=settings.DEEPSEEK_VISION_BASE_URL,
+            api_key=(settings.DEEPSEEK_VISION_API_KEY or settings.DEEPSEEK_API_KEY),
+            model=settings.DEEPSEEK_VISION_MODEL,
+            timeout=90.0
+        )
+        return _clean_answer(text)
 
-def _clean_output(s: str) -> str:
-    # Убираем частые "кривые" обвязки, чтобы не было \\( \\) и \\[ \\]
-    s = s.replace("\\(", "").replace("\\)", "")
-    s = s.replace("\\[", "").replace("\\]", "")
-    s = s.replace("```", "")
-    return s.strip()
-
-
-async def ask_deepseek_text(prompt: str) -> str:
-    url = _endpoint()
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    system = (
-        "Ты помощник по учебе. "
-        "Отвечай обычным текстом без LaTeX-обёрток вида \\( \\), \\[ \\]. "
-        "Если нужны формулы — пиши их простым текстом (например: x^2 - 2x + 1). "
-        "Не используй тройные кавычки/кодовые блоки."
-    )
-
-    payload = {
-        "model": DEEPSEEK_TEXT_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload, timeout=120) as r:
-            txt = await r.text()
-            if r.status != 200:
-                raise RuntimeError(f"DeepSeek error {r.status}: {txt}")
-            data = await r.json()
-
-    content = data["choices"][0]["message"]["content"]
-    return _clean_output(content)
-
-
-async def ask_deepseek_vision(prompt: str, image_bytes: bytes, mime: str = "image/jpeg") -> str:
-    url = _endpoint()
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    system = (
-        "Ты помощник по учебе. "
-        "Сначала аккуратно распознай текст задания с изображения, затем реши. "
-        "Отвечай обычным текстом без LaTeX-обёрток вида \\( \\), \\[ \\]. "
-        "Не используй кодовые блоки."
-    )
-
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:{mime};base64,{b64}"
-
-    payload = {
-        "model": DEEPSEEK_VISION_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            },
-        ],
-        "temperature": 0.2,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload, timeout=180) as r:
-            txt = await r.text()
-            if r.status != 200:
-                raise RuntimeError(f"DeepSeek vision error {r.status}: {txt}")
-            data = await r.json()
-
-    content = data["choices"][0]["message"]["content"]
-    return _clean_output(content)
+    # OCR fallback
+    prompt = f"""Вот текст, распознанный с фото (может быть с ошибками). 
+1) Аккуратно восстанови условие задачи без мусора.
+2) Реши задачу подробно.
+3) В конце отдельно напиши строку: Ответ: ...
+Текст:
+{ocr_text}
+"""
+    messages = [
+        {"role": "system", "content": "Ты решаешь задачи по фото. Исправляй ошибки OCR. Не используй '>' и ```."},
+        {"role": "user", "content": prompt},
+    ]
+    text = await _chat_completion(messages, base_url=settings.DEEPSEEK_BASE_URL, api_key=settings.DEEPSEEK_API_KEY, model=settings.DEEPSEEK_TEXT_MODEL, timeout=90.0)
+    return _clean_answer(text)
