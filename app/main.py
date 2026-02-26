@@ -1,61 +1,78 @@
 import os
-import asyncio
 import logging
-
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import CommandStart
-from aiogram.types import Update
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()  # например: https://tg-deepseek-bot-production.up.railway.app/webhook
 
-bot = Bot(token=BOT_TOKEN)
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+
 dp = Dispatcher()
+router = Router()
+dp.include_router(router)
+
+menu_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📚 Помощь"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="🧾 Статус")],
+    ],
+    resize_keyboard=True,
+)
+
+@router.message(CommandStart())
+async def cmd_start(message: Message):
+    await message.answer("✅ Бот запущен. Выбери действие:", reply_markup=menu_kb)
+
+@router.message(F.text == "🧾 Статус")
+async def status(message: Message):
+    await message.answer("🟢 Status: ok")
+
+@router.message(F.text == "📚 Помощь")
+async def help_(message: Message):
+    await message.answer("Напиши /start чтобы открыть меню.")
+
+@router.message(F.text == "⚙️ Настройки")
+async def settings(message: Message):
+    await message.answer("Настройки пока в разработке.")
 
 app = FastAPI()
 
-
-# HEALTHCHECK (важно для Railway)
 @app.get("/")
 async def root():
     return {"status": "ok"}
-
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-
-# TEST COMMAND
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    await message.answer("Бот работает ✅")
-
-
-# WEBHOOK ENDPOINT
 @app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.model_validate(data)
-        await dp.feed_update(bot, update)
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        logging.exception("Webhook error")
-        return JSONResponse({"ok": False})
+async def telegram_webhook(request: Request):
+    update = await request.json()
+    await dp.feed_raw_update(bot, update)
+    return {"status": "ok"}
 
-
-# STARTUP
 @app.on_event("startup")
-async def startup():
-    logging.info("Bot started")
+async def on_startup():
+    # ВАЖНО: включаем вебхук только если WEBHOOK_URL задан
+    if WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        logging.info(f"Webhook set to: {WEBHOOK_URL}")
+    else:
+        logging.warning("WEBHOOK_URL is not set (webhook will NOT be configured)")
 
-
-# SHUTDOWN
 @app.on_event("shutdown")
-async def shutdown():
+async def on_shutdown():
     await bot.session.close()
